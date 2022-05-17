@@ -90,8 +90,11 @@ class Executable:
                     raise PermissionError(data[0][1])
 
         if channel and permissions.value != 0 and not channel.permissions_for(author).is_strict_superset(permissions) and not await has_magic_role(author, guild, "Bloxlink Admin"):
-            if permissions.bloxlink_updater and not await has_magic_role(author, guild, "Bloxlink Updater"):
-                raise PermissionError("You do not have the required permissions to use this command.")
+            if permissions.bloxlink_updater:
+                if not await has_magic_role(author, guild, "Bloxlink Updater"):
+                    raise PermissionError("You do not have the required permissions to use this command.")
+
+            raise PermissionError("You do not have the required permissions to use this command.")
 
 
 class Command(Executable):
