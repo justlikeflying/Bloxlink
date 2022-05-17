@@ -13,7 +13,7 @@ class UpdateUserExtension(Bloxlink.Module):
     def __init__(self):
         self.type = 2
         self.name = "Update User"
-        self.permissions = Bloxlink.Permissions(manage_guild=True, manage_roles=True)
+        self.permissions = Bloxlink.Permissions(manage_guild=True, manage_roles=True, bloxlink_updater=True)
         self.slash_defer = True
         self.slash_ephemeral = True
         self.premium_bypass_channel_perms = True
