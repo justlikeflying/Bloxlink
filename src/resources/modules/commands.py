@@ -166,7 +166,7 @@ class Commands(Bloxlink.Module):
                     ignored_channel = ignored_channels.get(channel_id) or (channel.category and ignored_channels.get(str(channel.category.id)))
                     bypass_roles = ignored_channel.get("bypassRoles", []) if ignored_channel else []
 
-                    if ignored_channel and not discord.utils.find(lambda r: str(r.id) in bypass_roles, author.roles):
+                    if ignored_channel and not discord.utils.find(lambda r: r and str(r.id) in bypass_roles, author.roles):
                         await response.send(f"The server admins have **disabled** all commands in channel {channel.mention}.{premium_upsell}", dm=True, hidden=True, strict_post=True, no_dm_post=True)
 
                         if message:
@@ -640,9 +640,9 @@ class Commands(Bloxlink.Module):
             if command_args:
                 response.first_slash_command = getattr(command_args, "first_slash_command", response.first_slash_command)
 
-            if Arguments.in_prompt(user):
-                await response.send("You are currently in a prompt! Please complete it or say `cancel` to cancel.", hidden=True)
-                raise CancelCommand
+            # if Arguments.in_prompt(user):
+            #     await response.send("You are currently in a prompt! Please complete it or press the cancel button on the prompt.", hidden=True)
+            #     raise CancelCommand
 
             response.args.add(locale=locale, response=response)
 

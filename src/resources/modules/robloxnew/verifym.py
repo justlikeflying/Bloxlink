@@ -3,7 +3,7 @@ from ...exceptions import BloxlinkBypass, Blacklisted, PermissionError, UserNotV
 from resources.constants import VERIFY_URL, VERIFY_URL_GUILD, DEFAULTS # pylint: disable=import-error, no-name-in-module
 import discord
 
-guild_obligations, format_update_embed = Bloxlink.get_module("roblox", attrs=["guild_obligations", "format_update_embed"]) # LEGACY METHODS
+guild_obligations, format_update_embed, send_account_confirmation, get_user = Bloxlink.get_module("roblox", attrs=["guild_obligations", "format_update_embed", "send_account_confirmation", "get_user"]) # LEGACY METHODS
 has_premium = Bloxlink.get_module("premium", attrs=["has_premium"])
 
 
@@ -46,9 +46,14 @@ class VerifyM(Bloxlink.Module):
             await response.slash_defer()
 
             try:
+                roblox_user = (await get_user(user=user))[0]
+
+                await send_account_confirmation(user, roblox_user, guild, response, ephemeral=True)
+
                 added, removed, nickname, errors, warnings, roblox_user, bind_explanations = await guild_obligations(
                     response.args.author,
                     join                 = True,
+                    roblox_user          = roblox_user,
                     guild                = guild,
                     roles                = True,
                     nickname             = True,

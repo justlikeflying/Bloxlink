@@ -181,7 +181,7 @@ class BindCommand(Bloxlink.Module):
                         raise Message("This group is already linked!", type="silly")
 
                 for _, roleset_data in group.rolesets.items():
-                    discord_role = discord.utils.find(lambda r: r.name == roleset_data[0], guild.roles)
+                    discord_role = discord.utils.find(lambda r: r.name == roleset_data[0].strip(), guild.roles)
 
                     if not discord_role:
                         try:

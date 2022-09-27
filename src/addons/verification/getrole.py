@@ -4,10 +4,11 @@ from resources.exceptions import (Message, UserNotVerified, Error, RobloxNotFoun
                                  Blacklisted, PermissionError, CancelCommand) # pylint: disable=import-error, no-name-in-module
 from resources.constants import GREEN_COLOR # pylint: disable=import-error, no-name-in-module
 
-get_user, get_nickname, get_roblox_id, parse_accounts, format_update_embed, guild_obligations, get_binds_explanation_button = Bloxlink.get_module("roblox", attrs=["get_user", "get_nickname", "get_roblox_id", "parse_accounts", "format_update_embed", "guild_obligations", "get_binds_explanation_button"])
+get_user, get_nickname, get_roblox_id, parse_accounts, format_update_embed, guild_obligations, get_binds_explanation_button, send_account_confirmation = Bloxlink.get_module("roblox", attrs=["get_user", "get_nickname", "get_roblox_id", "parse_accounts", "format_update_embed", "guild_obligations", "get_binds_explanation_button", "send_account_confirmation"])
 post_event = Bloxlink.get_module("utils", attrs=["post_event"])
 set_guild_value = Bloxlink.get_module("cache", attrs=["set_guild_value"])
 get_verify_link = Bloxlink.get_module("robloxnew.verifym", attrs=["get_verify_link"], name_override="verifym")
+has_premium = Bloxlink.get_module("premium", attrs=["has_premium"])
 
 
 
@@ -40,7 +41,11 @@ class GetRoleCommand(Bloxlink.Module):
         try:
             if not guild:
                 await response.info("You must run this in a server to get your roles.")
-                raise UserNotVerified
+                raise UserNotVerified()
+
+            roblox_account = (await get_user(user=author))[0]
+
+            await send_account_confirmation(author, roblox_account, guild, response)
 
             if CommandArgs.command_name in ("getrole", "getroles"):
                 CommandArgs.string_args = []
@@ -50,6 +55,7 @@ class GetRoleCommand(Bloxlink.Module):
             added, removed, nickname, errors, warnings, roblox_user, bind_explanations = await guild_obligations(
                 CommandArgs.author,
                 join                 = True,
+                roblox_user          = roblox_account,
                 guild                = guild,
                 roles                = True,
                 nickname             = True,

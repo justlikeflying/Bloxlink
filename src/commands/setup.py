@@ -175,7 +175,7 @@ class SetupCommand(Bloxlink.Module):
                             raise CancelCommand
 
                 for _, roleset_data in group.rolesets.items():
-                    if not discord.utils.find(lambda r: r.name == roleset_data[0], guild.roles):
+                    if not discord.utils.find(lambda r: r.name == roleset_data[0].strip(), guild.roles):
                         try:
                             await guild.create_role(name=roleset_data[0], reason="Creating role from /setup")
                         except discord.errors.Forbidden:

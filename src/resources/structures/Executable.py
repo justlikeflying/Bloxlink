@@ -80,7 +80,7 @@ class Executable:
                 author_perms = author.guild_permissions
 
                 for role_exception in permissions.exceptions["roles"]:
-                    if discord.utils.find(lambda r: r.name == role_exception, author.roles):
+                    if discord.utils.find(lambda r: r and r.name == role_exception, author.roles):
                         return True
 
                 if permissions.bloxlink_role:
@@ -129,7 +129,7 @@ class Executable:
 
 
                 for role in permissions.allowed["roles"]:
-                    if not discord.utils.find(lambda r: r.name == role, author.roles):
+                    if not discord.utils.find(lambda r: r and r.name == role, author.roles):
                         raise PermissionError(f"Missing role: `{role}`")
 
             if permissions.allowed.get("functions"):

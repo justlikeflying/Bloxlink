@@ -15,7 +15,7 @@ class Extras(Bloxlink.Module):
         magic_roles = magic_roles_data or await get_guild_value(guild, "magicRoles") or {}
 
         for role in author.roles:
-            if role.name == magic_role_name:
+            if role and role.name == magic_role_name: # discord.py giving me None for roles...
                 has_any_magic_role = True
                 return True
             else:

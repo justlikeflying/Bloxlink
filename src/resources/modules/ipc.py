@@ -136,7 +136,7 @@ class IPC(Bloxlink.Module):
 
                     if action_type == "roles":
                         role_name = data["name"]
-                        role = discord.utils.find(lambda r: r.name == role_name, guild.roles)
+                        role = discord.utils.find(lambda r: r.name == role_name.strip(), guild.roles)
 
                         if not role:
                             try:

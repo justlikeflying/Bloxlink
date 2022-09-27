@@ -1,10 +1,10 @@
-from ..structures.Bloxlink import Bloxlink # pylint: disable=import-error, no-name-in-module
+from ..structures import Bloxlink, Response # pylint: disable=import-error, no-name-in-module
 from ..constants import DEFAULTS # pylint: disable=import-error, no-name-in-module
-from ..exceptions import CancelCommand, RobloxDown, Blacklisted # pylint: disable=import-error, no-name-in-module
+from ..exceptions import CancelCommand, RobloxDown, Blacklisted, UserNotVerified, PermissionError, Error # pylint: disable=import-error, no-name-in-module
 import discord
 
 get_guild_value = Bloxlink.get_module("cache", attrs=["get_guild_value"])
-guild_obligations = Bloxlink.get_module("roblox", attrs=["guild_obligations"])
+guild_obligations, get_user, send_account_confirmation, mask_unverified = Bloxlink.get_module("roblox", attrs=["guild_obligations", "get_user", "send_account_confirmation", "mask_unverified"])
 
 
 @Bloxlink.module
@@ -51,7 +51,20 @@ class MemberJoinEvent(Bloxlink.Module):
             else:
                 if auto_verification or auto_roles:
                     try:
-                        await guild_obligations(member, guild, cache=False, join=True, dm=True, event=True, exceptions=("RobloxDown", "Blacklisted"))
+                        roblox_user = (await get_user(user=member))[0]
+                    except UserNotVerified:
+                        roblox_user = None
+                    else:
+                        try:
+                            await mask_unverified(guild, member) # verified users will be treated as unverified until they confirm
+                        except (PermissionError, Error, CancelCommand):
+                            return
+
+                    response = Response(None, member, member, guild)
+
+                    try:
+                        await send_account_confirmation(member, roblox_user, guild, response)
+                        await guild_obligations(member, guild, roblox_user=roblox_user, cache=False, join=True, dm=True, event=True, exceptions=("RobloxDown", "Blacklisted"))
                     except (CancelCommand, Blacklisted):
                         pass
                     except RobloxDown:

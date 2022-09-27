@@ -7,7 +7,7 @@ import discord
 from datetime import datetime
 from config import REACTIONS # pylint: disable=import-error, no-name-in-module
 from ..constants import (BLOXLINK_STAFF, RELEASE, DEFAULTS,SERVER_INVITE, GREEN_COLOR, # pylint: disable=import-error, no-name-in-module
-                         RED_COLOR, VERIFY_URL, IGNORED_SERVERS) # pylint: disable=import-error, no-name-in-module
+                         RED_COLOR, VERIFY_URL, IGNORED_SERVERS, CLUSTER_ID, ORANGE_COLOR) # pylint: disable=import-error, no-name-in-module
 import json
 import re
 import asyncio
@@ -15,6 +15,7 @@ import dateutil.parser as parser
 import math
 import traceback
 import uuid
+import async_timeout
 
 
 nickname_template_regex = re.compile(r"\{(.*?)\}")
@@ -42,7 +43,151 @@ THUMBNAIL_API = "https://thumbnails.roblox.com"
 class Roblox(Bloxlink.Module):
     def __init__(self):
         self.pending_verifications = {}
+        self.pending_tasks = {}
 
+    async def __setup__(self):
+        pubsub = self.redis.pubsub()
+        await pubsub.subscribe(f"ACCOUNT_CONFIRM:{CLUSTER_ID}")
+
+        while True:
+            try:
+                message = await pubsub.get_message(ignore_subscribe_messages=True)
+
+                if message:
+                    self.loop.create_task(self.account_confirm_message(message))
+
+            except self.redis.exceptions.ConnectionError:
+                while True:
+                    try:
+                        await self.redis.ping()
+                    except self.redis.exceptions.ConnectionError:
+                        await asyncio.sleep(10)
+                    else:
+                        await pubsub.subscribe(f"ACCOUNT_CONFIRM:{CLUSTER_ID}")
+                        break
+
+    async def account_confirm_message(self, message):
+        message = json.loads(str(message["data"], "utf-8"))
+
+        data  = message["data"]
+        nonce = message["nonce"]
+
+        task = self.pending_tasks.get(nonce)
+
+        if not task:
+            return
+
+        if not task.done():
+            task.set_result(bool(data.get("confirmed")))
+        else:
+            self.pending_tasks.pop(nonce, None)
+
+
+    async def confirm_account(self, guild_id, roblox_id):
+        future = self.loop.create_future()
+        nonce = str(uuid.uuid4())
+
+        self.pending_tasks[nonce] = future
+
+        await self.redis.set(f"account_confirm:{guild_id}:{roblox_id}", json.dumps([nonce, CLUSTER_ID]), ex=3600)
+
+        try:
+            async with async_timeout.timeout(1000):
+                await future
+        except asyncio.TimeoutError:
+            pass
+
+        result = self.pending_tasks[nonce].result()
+        self.pending_tasks.pop(nonce, None)
+
+        return result
+
+    async def send_account_confirmation(self, user, roblox_account, guild, response, ephemeral=False):
+        if roblox_account and not "premium" in (await has_premium(guild=guild)).features:
+            roblox_accounts = await get_user_value(user, "robloxAccounts") or {"confirms": {}}
+            user_confirms = roblox_accounts.get("confirms", {})
+
+            if user_confirms.get(str(roblox_account.id)) in (True, str(guild.id)): # FIXME: old confirms, need to pop from database
+                user_confirms.pop(str(roblox_account.id), None)
+                roblox_accounts["confirms"] = user_confirms
+                await set_user_value(user, robloxAccounts=roblox_accounts)
+
+            if user_confirms.get(str(guild.id)) == str(roblox_account.id):
+                return
+
+            try:
+                view = discord.ui.View()
+                embed = discord.Embed(
+                    title="Confirm Account",
+                    description=f"Are you sure you want to use Roblox account **{roblox_account.username}** in this server?"
+
+                )
+
+                embed.colour = ORANGE_COLOR
+
+                view.add_item(
+                    item=discord.ui.Button(style=discord.ButtonStyle.link, label="Confirm Account", url=f"https://blox.link/confirm/{guild.id}/{roblox_account.id}")
+                )
+                view.add_item(
+                    item=discord.ui.Button(style=discord.ButtonStyle.link, label="Deny Account", url=f"https://blox.link/confirm/{guild.id}/{roblox_account.id}")
+                )
+
+                confirmation_message = await response.send(embed=embed, view=view, hidden=ephemeral)
+
+                confirmed = await self.confirm_account(guild.id, roblox_account.id)
+
+                if not confirmed:
+                    raise CancelCommand()
+
+                embed.colour = GREEN_COLOR
+                embed.description = "Thanks for confirming the account! Confirmation helps us secure verifications."
+                embed.title = "Confirmed Account"
+
+                await confirmation_message.edit(embed=embed)
+
+                user_confirms[str(guild.id)] = str(roblox_account.id)
+                roblox_accounts["confirms"] = user_confirms
+
+                await set_user_value(user, robloxAccounts=roblox_accounts)
+
+            except discord.errors.Forbidden:
+                raise CancelCommand()
+
+    async def mask_unverified(self, guild, member):  # only used for non-premium servers to mask a user as unverified so they can confirm prompt
+        if not "premium" in (await has_premium(guild=guild)).features:
+            options = await get_guild_value(guild,
+                                            ["unverifiedRoleEnabled", DEFAULTS.get("unverifiedRoleEnabled")],
+                                            "unverifiedRole",)
+
+            unverify_role_enabled = options.get("unverifiedRoleEnabled")
+            unverified_role_name = options.get("unverifiedRoleName") or DEFAULTS.get("unverifiedRoleName")
+
+            unverified_role_id = int(options.get("unverifiedRole")) if options.get("unverifiedRole") else None
+
+            unverified_role = None
+
+            if unverify_role_enabled:
+                if unverified_role_id:
+                    unverified_role = discord.utils.find(lambda r: (r.id == unverified_role_id) and not r.managed, guild.roles)
+
+                if not unverified_role:
+                    unverified_role = discord.utils.find(lambda r: (r.name == unverified_role_name.strip()) and not r.managed, guild.roles)
+
+                if not unverified_role:
+                    try:
+                        unverified_role = await guild.create_role(name=unverified_role_name, reason="Creating missing Unverified role")
+                    except discord.errors.Forbidden:
+                        raise PermissionError("I was unable to create the Unverified Role. Please "
+                                            "ensure I have the `Manage Roles` permission.")
+                    except discord.errors.HTTPException:
+                        raise Error("Unable to create role: this server has reached the max amount of roles!")
+
+                try:
+                    await member.add_roles(unverified_role)
+                except discord.errors.Forbidden:
+                    raise PermissionError("I was unable to give you the Unverified role.")
+                except discord.errors.NotFound:
+                    raise CancelCommand()
 
     @staticmethod
     async def get_roblox_id(username) -> Tuple[str, str]:
@@ -325,6 +470,7 @@ class Roblox(Bloxlink.Module):
         clan_tag = get_from_db() # FIXME
 
         return clan_tag
+
 
     async def save_binds_explanations(self, bind_explanations):
         nonce = str(uuid.uuid4())
@@ -1279,7 +1425,7 @@ class Roblox(Bloxlink.Module):
 
             for role_id in bound_roles:
                 int_role_id = role_id.isdigit() and int(role_id)
-                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                 if role:
                     add_roles.add(role)
@@ -1295,7 +1441,7 @@ class Roblox(Bloxlink.Module):
 
             for role_id in bind_remove_roles:
                 int_role_id = role_id.isdigit() and int(role_id)
-                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                 if role:
                     remove_roles.add(role)
@@ -1305,7 +1451,7 @@ class Roblox(Bloxlink.Module):
 
             for role_id in bound_roles:
                 int_role_id = role_id.isdigit() and int(role_id)
-                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                 if role and not allow_old_roles:
                     remove_roles.add(role)
@@ -1341,7 +1487,7 @@ class Roblox(Bloxlink.Module):
                 unverified_role = discord.utils.find(lambda r: (r.id == unverified_role_id) and not r.managed, guild.roles)
 
             if not unverified_role:
-                unverified_role = discord.utils.find(lambda r: (r.name == unverified_role_name) and not r.managed, guild.roles)
+                unverified_role = discord.utils.find(lambda r: (r.name == unverified_role_name.strip()) and not r.managed, guild.roles)
 
             if not unverified_role:
                 try:
@@ -1358,7 +1504,7 @@ class Roblox(Bloxlink.Module):
                 verified_role = discord.utils.find(lambda r: (r.id == verified_role_id) and not r.managed, guild.roles)
 
             if not verified_role:
-                verified_role = discord.utils.find(lambda r: (r.name == verified_role_name) and not r.managed, guild.roles)
+                verified_role = discord.utils.find(lambda r: (r.name == verified_role_name.strip()) and not r.managed, guild.roles)
 
             if not verified_role:
                 try:
@@ -1448,7 +1594,7 @@ class Roblox(Bloxlink.Module):
 
                                         for role_id in bound_roles:
                                             int_role_id = role_id.isdigit() and int(role_id)
-                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                             if role:
                                                 add_roles.add(role)
@@ -1467,7 +1613,7 @@ class Roblox(Bloxlink.Module):
 
                                         for role_id in bind_remove_roles:
                                             int_role_id = role_id.isdigit() and int(role_id)
-                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                                             if role:
                                                 remove_roles.add(role)
@@ -1476,7 +1622,7 @@ class Roblox(Bloxlink.Module):
 
                                         for role_id in bound_roles:
                                             int_role_id = role_id.isdigit() and int(role_id)
-                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                             if role:
                                                 if not allow_old_roles and role in user.roles:
@@ -1524,7 +1670,7 @@ class Roblox(Bloxlink.Module):
                                             if bound_roles:
                                                 for role_id in bound_roles:
                                                     int_role_id = role_id.isdigit() and int(role_id)
-                                                    role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                                                    role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                                                     if role and not allow_old_roles:
                                                         remove_roles.add(role)
@@ -1537,7 +1683,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bound_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                                 if role:
                                                     add_roles.add(role)
@@ -1561,7 +1707,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bind_remove_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                                                 if role:
                                                     remove_roles.add(role)
@@ -1571,7 +1717,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bound_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                                 if role:
                                                     if not allow_old_roles and role in user.roles:
@@ -1594,7 +1740,7 @@ class Roblox(Bloxlink.Module):
 
                                                 for role_id in bound_roles:
                                                     int_role_id = role_id.isdigit() and int(role_id)
-                                                    role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                                    role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                                     if role:
                                                         add_roles.add(role)
@@ -1613,7 +1759,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bind_remove_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                                                 if role:
                                                     remove_roles.add(role)
@@ -1622,7 +1768,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bound_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                                 if role:
                                                     if not allow_old_roles and role in user.roles:
@@ -1653,7 +1799,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bound_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                                 if role:
                                                     if roles:
@@ -1673,7 +1819,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bind_remove_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                                                 if role:
                                                     remove_roles.add(role)
@@ -1682,7 +1828,7 @@ class Roblox(Bloxlink.Module):
 
                                             for role_id in bound_roles:
                                                 int_role_id = role_id.isdigit() and int(role_id)
-                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                                role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                                 if role:
                                                     if not allow_old_roles and role in user.roles:
@@ -1697,7 +1843,7 @@ class Roblox(Bloxlink.Module):
 
                                         for role_id in bound_roles:
                                             int_role_id = role_id.isdigit() and int(role_id)
-                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, guild.roles)
+                                            role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, guild.roles)
 
                                             if role:
                                                 if not allow_old_roles and role in user.roles:
@@ -1717,7 +1863,7 @@ class Roblox(Bloxlink.Module):
 
                             if group:
                                 await group.apply_rolesets()
-                                group_role = discord.utils.find(lambda r: r.name == group.user_rank_name and not r.managed, guild.roles)
+                                group_role = discord.utils.find(lambda r: r.name == group.user_rank_name.strip() and not r.managed, guild.roles)
 
                                 if not group_role:
                                     dynamic_roles = await get_guild_value(guild, ["dynamicRoles", DEFAULTS.get("dynamicRoles")])
@@ -1732,7 +1878,7 @@ class Roblox(Bloxlink.Module):
                                             raise Error("Unable to create role: this server has reached the max amount of roles!")
 
                                 for _, roleset_data in group.rolesets.items():
-                                    has_role = discord.utils.find(lambda r: r.name == roleset_data[0] and not r.managed, user.roles)
+                                    has_role = discord.utils.find(lambda r: r.name == roleset_data[0].strip() and not r.managed, user.roles)
 
                                     if has_role:
                                         if not allow_old_roles and group.user_rank_name != roleset_data[0]:
@@ -1744,7 +1890,7 @@ class Roblox(Bloxlink.Module):
 
                                     for role_id in bind_remove_roles:
                                         int_role_id = role_id.isdigit() and int(role_id)
-                                        role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == role_id) and not r.managed, user.roles)
+                                        role = discord.utils.find(lambda r: ((int_role_id and r.id == int_role_id) or r.name == str(role_id).strip()) and not r.managed, user.roles)
 
                                         if role:
                                             remove_roles.add(role)
@@ -1767,7 +1913,7 @@ class Roblox(Bloxlink.Module):
                                     raise Error(f"Error for linked group bind: group `{group_id}` not found")
 
                                 for _, roleset_data in group.rolesets.items():
-                                    group_role = discord.utils.find(lambda r: r.name == roleset_data[0] and not r.managed, user.roles)
+                                    group_role = discord.utils.find(lambda r: r.name == roleset_data[0].strip() and not r.managed, user.roles)
 
                                     if not allow_old_roles and group_role:
                                         remove_roles.add(group_role)

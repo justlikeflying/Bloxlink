@@ -1,10 +1,10 @@
-from ..structures.Bloxlink import Bloxlink # pylint: disable=import-error, no-name-in-module
+from ..structures import Bloxlink, Response # pylint: disable=import-error, no-name-in-module
 from ..constants import DEFAULTS # pylint: disable=import-error, no-name-in-module
-from ..exceptions import CancelCommand, RobloxDown, Blacklisted # pylint: disable=import-error, no-name-in-module
+from ..exceptions import CancelCommand, RobloxDown, Blacklisted, UserNotVerified, PermissionError, Error # pylint: disable=import-error, no-name-in-module
 import discord
 
 get_guild_value = Bloxlink.get_module("cache", attrs=["get_guild_value"])
-guild_obligations = Bloxlink.get_module("roblox", attrs=["guild_obligations"])
+guild_obligations, send_account_confirmation, get_user, mask_unverified = Bloxlink.get_module("roblox", attrs=["guild_obligations", "send_account_confirmation", "get_user", "mask_unverified"])
 
 
 @Bloxlink.module
@@ -33,6 +33,19 @@ class MemberUpdateEvent(Bloxlink.Module):
 
                 if auto_verification or auto_roles:
                     try:
+                        roblox_user = (await get_user(user=after))[0]
+                    except UserNotVerified:
+                        roblox_user = None
+                    else:
+                        try:
+                            await mask_unverified(guild, after) # verified users will be treated as unverified until they confirm
+                        except (PermissionError, Error, CancelCommand):
+                            return
+
+                    response = Response(None, after, after, guild)
+
+                    try:
+                        await send_account_confirmation(after, roblox_user, guild, response)
                         await guild_obligations(after, guild, cache=False, join=True, dm=True, event=True, exceptions=("RobloxDown", "Blacklisted"))
                     except CancelCommand:
                         pass
@@ -41,5 +54,5 @@ class MemberUpdateEvent(Bloxlink.Module):
                             await after.send("Roblox appears to be down, so I was unable to retrieve your Roblox information. Please try again later.")
                         except discord.errors.Forbidden:
                             pass
-                    except Blacklisted as b:
+                    except Blacklisted:
                         pass

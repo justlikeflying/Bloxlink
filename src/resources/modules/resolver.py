@@ -339,7 +339,7 @@ class Resolver(Bloxlink.Module):
                     if lookup_string.isdigit():
                         role = guild.get_role(int(lookup_string))
                     else:
-                        role = discord.utils.find(lambda r: r.name == lookup_string, guild.roles)
+                        role = discord.utils.find(lambda r: r.name == lookup_string.strip(), guild.roles)
 
                     if not role:
                         if create_missing_role:

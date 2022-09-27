@@ -129,8 +129,8 @@ class Response(Bloxlink.Module):
         self.author  = author
         self.channel = channel
         self.prompt  = None # filled in on commands.py
-        self.args    = CommandArgs
-        self.command = CommandArgs.command
+        self.args    = CommandArgs if CommandArgs else Args()
+        self.command = CommandArgs.command if CommandArgs else None
 
         self.delete_message_queue = []
         self.bot_responses        = []
@@ -233,13 +233,15 @@ class Response(Bloxlink.Module):
         if channel_override:
             send_as_slash_command = False
 
-        if reply and not self.interaction:
+        if reply and not self.interaction :
             if reference:
                 reference = MessageReference(message_id=reference.id, channel_id=reference.channel.id,
                                              guild_id=reference.guild and reference.guild.id, fail_if_not_exists=False)
-            else:
+            elif self.message:
                 reference = MessageReference(message_id=self.message.id, channel_id=self.message.channel.id,
                                              guild_id=self.message.guild and self.message.guild.id, fail_if_not_exists=False)
+            else:
+                reference = None
         else:
             reference = None
 
